@@ -6,7 +6,7 @@ RUN chmod +x /webhook-server
 
 FROM alpine:3.7
 
-RUN apk add --no-cache bash coreutils curl && \
+RUN apk add --no-cache bash coreutils curl openssl && \
 	curl -sSL "http://npc.nos-eastchina1.126.net/dl/dumb-init_1.2.0_amd64.tar.gz" | tar -zx -C /usr/bin && \
 	curl -sSL 'http://npc.nos-eastchina1.126.net/dl/jq_1.5_linux_amd64.tar.gz' | tar -zx -C /usr/bin
 
