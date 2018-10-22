@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -37,6 +38,11 @@ func setupEnv(handler *exec.Cmd, req *http.Request) error {
 		fmt.Sprintf("HTTP_REQUEST_PATH=%s", req.URL.Path),
 		fmt.Sprintf("HTTP_REQUEST_QUERY=%s", req.URL.RawQuery),
 	)
+	if remoteIP, remotePort, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		env = append(env, "HTTP_REMOTE_ADDR="+remoteIP, "HTTP_REMOTE_PORT="+remotePort)
+	} else {
+		env = append(env, "HTTP_REMOTE_ADDR="+req.RemoteAddr)
+	}
 
 	if err := req.ParseForm(); err != nil {
 		return err
