@@ -156,6 +156,6 @@ func main() {
 			http.Error(res, err.Error(), http.StatusInternalServerError)
 		}
 	})
-	logger.Printf("serving %s ...", serverBindAddr)
+	logger.Printf("Serving %s ...", serverBindAddr)
 	logger.Fatal(http.ListenAndServe(serverBindAddr, nil))
 }
