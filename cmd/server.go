@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,6 +14,10 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/xiaopal/kube-informer/pkg/appctx"
+	"github.com/xiaopal/kube-informer/pkg/subreaper"
 )
 
 var (
@@ -24,13 +29,14 @@ var (
 	handlerArgs      []string
 	jsonHandlers     bool
 	accessLogs       bool
+	requestData      bool
 )
 
 func newLogger(prefix string) *log.Logger {
 	return log.New(os.Stderr, prefix, log.Flags())
 }
 
-func setupEnv(handler *exec.Cmd, req *http.Request) error {
+func setupHandler(handler *exec.Cmd, req *http.Request) error {
 	env := append(os.Environ(),
 		fmt.Sprintf("HTTP_REQUEST_HOST=%s", req.Host),
 		fmt.Sprintf("HTTP_REQUEST_METHOD=%s", req.Method),
@@ -74,7 +80,17 @@ func setupEnv(handler *exec.Cmd, req *http.Request) error {
 			env = append(env, fmt.Sprintf("HEADER_%s=%s", envName(k), strings.Join(v, ",")))
 		}
 	}
+
 	handler.Env = env
+
+	if requestData {
+		handler.Stdin = req.Body
+	}
+
+	if err := pipeStderr(handler, logger); err != nil {
+		return fmt.Errorf("failed to pipe: %v", err)
+	}
+
 	return nil
 }
 
@@ -99,15 +115,13 @@ type handlerResponse struct {
 }
 
 func handleRequest(res http.ResponseWriter, req *http.Request, logger *log.Logger) error {
-	handler := exec.Command(handlerArgs[0], handlerArgs[1:]...)
-	if err := setupEnv(handler, req); err != nil {
-		return fmt.Errorf("failed to setup env: %v", err)
+	handler := exec.CommandContext(req.Context(), handlerArgs[0], handlerArgs[1:]...)
+	if err := setupHandler(handler, req); err != nil {
+		return fmt.Errorf("failed to setup handler: %v", err)
 	}
 
-	if err := pipeStderr(handler, logger); err != nil {
-		return fmt.Errorf("failed to pipe: %v", err)
-	}
-
+	subreaper.Pause()
+	defer subreaper.Resume()
 	handlerOut, err := handler.Output()
 	if err != nil {
 		return fmt.Errorf("failed to execute handler: %v", err)
@@ -132,6 +146,31 @@ func handleRequest(res http.ResponseWriter, req *http.Request, logger *log.Logge
 	return nil
 }
 
+func httpServ() error {
+	app, server := appctx.Start(), &http.Server{Addr: serverBindAddr}
+	defer app.End()
+
+	if os.Getpid() == 1 {
+		subreaper.Start(app.Context())
+	}
+
+	logger.Printf("Serving %s ...", serverBindAddr)
+	go func() {
+		app.WaitGroup().Add(1)
+		defer app.WaitGroup().Done()
+		<-app.Context().Done()
+		logger.Printf("Closing %s ...", serverBindAddr)
+		ctx, _ := context.WithTimeout(context.TODO(), time.Second*60)
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Printf("failed to shutdown server: %v", err)
+			if err = server.Close(); err != nil {
+				logger.Printf("failed to close server: %v", err)
+			}
+		}
+	}()
+	return server.ListenAndServe()
+}
+
 func main() {
 	logger = newLogger("[server ] ")
 
@@ -141,7 +180,9 @@ func main() {
 	flag.BoolVar(&exposeHeaders, "headers", false, "expose headers")
 	flag.BoolVar(&jsonHandlers, "json-handlers", false, "use json handlers")
 	flag.BoolVar(&accessLogs, "v", false, "show access logs")
+	flag.BoolVar(&requestData, "data", false, "pass request data to stdin")
 	flag.Parse()
+
 	if handlerArgs = flag.Args(); len(handlerArgs) < 1 {
 		logger.Fatal("handler args required")
 	}
@@ -156,6 +197,5 @@ func main() {
 			http.Error(res, err.Error(), http.StatusInternalServerError)
 		}
 	})
-	logger.Printf("Serving %s ...", serverBindAddr)
-	logger.Fatal(http.ListenAndServe(serverBindAddr, nil))
+	logger.Fatal(httpServ())
 }
