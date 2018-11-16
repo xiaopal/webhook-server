@@ -13,4 +13,4 @@ RUN apk add --no-cache bash coreutils curl openssl && \
 COPY --from=build /webhook-server /webhook-server
 RUN ln -s /webhook-server /usr/bin/webhook-server
 
-ENTRYPOINT [ "/usr/bin/dumb-init", "/webhook-server" ]
+ENTRYPOINT [ "/webhook-server" ]
