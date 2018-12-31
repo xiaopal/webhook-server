@@ -1,149 +1,45 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/xiaopal/kube-informer/pkg/appctx"
 	"github.com/xiaopal/kube-informer/pkg/subreaper"
 )
 
+const (
+	handlerTypeSimple = "simple"
+	handlerTypeJSON   = "json"
+	handlerTypeFd     = "fd"
+)
+
 var (
-	logger           *log.Logger
-	serverBindAddr   string
-	location         string
-	exposeFormValues bool
-	exposeHeaders    bool
-	handlerArgs      []string
-	jsonHandlers     bool
-	accessLogs       bool
-	requestData      bool
+	logger             *log.Logger
+	serverBindAddr     string
+	location           string
+	exposeFormValues   bool
+	exposeHeaders      bool
+	handlerName        string
+	handlerType        string
+	handlerArgs        []string
+	jsonHandlers       bool
+	accessLogs         bool
+	requestData        bool
+	handlerConcurrency int
+	handlerWaitTimeout int
+	handlerTimeout     int
+	handlerExtractor   func(*exec.Cmd, http.ResponseWriter) error
 )
 
 func newLogger(prefix string) *log.Logger {
 	return log.New(os.Stderr, prefix, log.Flags())
-}
-
-func setupHandler(handler *exec.Cmd, req *http.Request) error {
-	env := append(os.Environ(),
-		fmt.Sprintf("HTTP_REQUEST_HOST=%s", req.Host),
-		fmt.Sprintf("HTTP_REQUEST_METHOD=%s", req.Method),
-		fmt.Sprintf("HTTP_REQUEST_URI=%s", req.URL.RequestURI()),
-		fmt.Sprintf("HTTP_REQUEST_PATH=%s", req.URL.Path),
-		fmt.Sprintf("HTTP_REQUEST_QUERY=%s", req.URL.RawQuery),
-	)
-	if remoteIP, remotePort, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-		env = append(env, "HTTP_REMOTE_ADDR="+remoteIP, "HTTP_REMOTE_PORT="+remotePort)
-	} else {
-		env = append(env, "HTTP_REMOTE_ADDR="+req.RemoteAddr)
-	}
-
-	if err := req.ParseForm(); err != nil {
-		return err
-	}
-
-	form, err := json.Marshal(req.Form)
-	if err != nil {
-		return err
-	}
-	env = append(env, fmt.Sprintf("HTTP_REQUEST_FORM=%s", form))
-
-	headers, err := json.Marshal(req.Header)
-	if err != nil {
-		return err
-	}
-	env = append(env, fmt.Sprintf("HTTP_REQUEST_HEADERS=%s", headers))
-
-	envName := func(s string) string {
-		return regexp.MustCompile(`[^\w\d]+`).ReplaceAllString(strings.ToUpper(s), "_")
-	}
-
-	if exposeFormValues {
-		for k, v := range req.Form {
-			env = append(env, fmt.Sprintf("FORM_%s=%s", envName(k), strings.Join(v, ",")))
-		}
-	}
-	if exposeHeaders {
-		for k, v := range req.Header {
-			env = append(env, fmt.Sprintf("HEADER_%s=%s", envName(k), strings.Join(v, ",")))
-		}
-	}
-
-	handler.Env = env
-
-	if requestData {
-		handler.Stdin = req.Body
-	}
-
-	if err := pipeStderr(handler, logger); err != nil {
-		return fmt.Errorf("failed to pipe: %v", err)
-	}
-
-	return nil
-}
-
-func pipeStderr(cmd *exec.Cmd, logger *log.Logger) error {
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	go func() {
-		o := bufio.NewScanner(stderr)
-		for o.Scan() {
-			logger.Println(o.Text())
-		}
-	}()
-	return nil
-}
-
-type handlerResponse struct {
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
-}
-
-func handleRequest(res http.ResponseWriter, req *http.Request, logger *log.Logger) error {
-	handler := exec.CommandContext(req.Context(), handlerArgs[0], handlerArgs[1:]...)
-	if err := setupHandler(handler, req); err != nil {
-		return fmt.Errorf("failed to setup handler: %v", err)
-	}
-
-	subreaper.Pause()
-	defer subreaper.Resume()
-	handlerOut, err := handler.Output()
-	if err != nil {
-		return fmt.Errorf("failed to execute handler: %v", err)
-	}
-
-	if !jsonHandlers {
-		res.Write(handlerOut)
-		return nil
-	}
-
-	var response handlerResponse
-	if err := json.Unmarshal(handlerOut, &response); err != nil {
-		return fmt.Errorf("failed to parse handler output: %v", err)
-	}
-	for k, v := range response.Headers {
-		res.Header().Set(k, v)
-	}
-	if response.Status > 0 {
-		res.WriteHeader(response.Status)
-	}
-	io.WriteString(res, response.Body)
-	return nil
 }
 
 func httpServ() error {
@@ -153,6 +49,20 @@ func httpServ() error {
 	if os.Getpid() == 1 {
 		subreaper.Start(app.Context())
 	}
+
+	limitSem := make(chan bool, handlerConcurrency)
+	http.HandleFunc(location, func(res http.ResponseWriter, req *http.Request) {
+		if accessLogs {
+			res = &accessLogWriter{res, func(statusCode int) {
+				newLogger("[access] ").Printf("%d %s %s - %s %s", statusCode, req.Method, req.URL.RequestURI(), req.RemoteAddr, req.UserAgent())
+			}}
+		}
+		logger := newLogger(fmt.Sprintf("[%s] ", handlerName))
+		if err := handleRequest(res, req, limitSem, logger); err != nil {
+			logger.Printf("%s %s: %v", req.Method, req.URL.RequestURI(), err)
+			http.Error(res, err.Error(), http.StatusInternalServerError)
+		}
+	})
 
 	logger.Printf("Serving %s ...", serverBindAddr)
 	go func() {
@@ -171,31 +81,60 @@ func httpServ() error {
 	return server.ListenAndServe()
 }
 
+type accessLogWriter struct {
+	res    http.ResponseWriter
+	logger func(int)
+}
+
+func (w *accessLogWriter) Header() http.Header {
+	return w.res.Header()
+}
+func (w *accessLogWriter) Write(body []byte) (int, error) {
+	w.log(200)
+	return w.res.Write(body)
+}
+func (w *accessLogWriter) WriteHeader(statusCode int) {
+	w.log(statusCode)
+	w.res.WriteHeader(statusCode)
+}
+
+func (w *accessLogWriter) log(statusCode int) {
+	if w.logger != nil {
+		w.logger(statusCode)
+		w.logger = nil
+	}
+}
+
 func main() {
-	logger = newLogger("[server ] ")
+	logger = newLogger("[server] ")
 
 	flag.StringVar(&serverBindAddr, "bind-addr", ":8080", "server bind addr")
 	flag.StringVar(&location, "location", "/", "location")
+	flag.StringVar(&handlerName, "name", "handler", "handler name")
+	flag.StringVar(&handlerType, "type", "simple", "handler type: simple, json, fd")
+	flag.IntVar(&handlerConcurrency, "concurrency", 50, "handler max concurrency")
+	flag.IntVar(&handlerWaitTimeout, "wait-timeout", -1, "handler max wait time")
+	flag.IntVar(&handlerTimeout, "timeout", -1, "handler max time")
 	flag.BoolVar(&exposeFormValues, "form-values", false, "expose form values")
 	flag.BoolVar(&exposeHeaders, "headers", false, "expose headers")
-	flag.BoolVar(&jsonHandlers, "json-handlers", false, "use json handlers")
+	flag.BoolVar(&jsonHandlers, "json-handlers", false, "deprecated, same as --type=json")
 	flag.BoolVar(&accessLogs, "v", false, "show access logs")
 	flag.BoolVar(&requestData, "data", false, "pass request data to stdin")
 	flag.Parse()
+
+	if jsonHandlers {
+		handlerType = handlerTypeJSON
+	}
+
+	if extractor, ok := extractors[handlerType]; ok {
+		handlerExtractor = extractor
+	} else {
+		logger.Fatal(fmt.Sprintf("unknown handler type: %s", handlerType))
+	}
 
 	if handlerArgs = flag.Args(); len(handlerArgs) < 1 {
 		logger.Fatal("handler args required")
 	}
 
-	http.HandleFunc(location, func(res http.ResponseWriter, req *http.Request) {
-		logger := newLogger("[handler] ")
-		if accessLogs {
-			logger.Printf("%s %s - %s %s", req.Method, req.URL.RequestURI(), req.RemoteAddr, req.UserAgent())
-		}
-		if err := handleRequest(res, req, logger); err != nil {
-			logger.Printf("%s %s: %v", req.Method, req.URL.RequestURI(), err)
-			http.Error(res, err.Error(), http.StatusInternalServerError)
-		}
-	})
 	logger.Fatal(httpServ())
 }
