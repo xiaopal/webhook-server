@@ -17,5 +17,7 @@ bin/webhook-server --location / -v --data --type=json --concurrency=10 --timeout
 
 bin/webhook-server --location / -v --form-values --headers --type=fd -- bash -c 'jq -n "{status: 200, headers: {\"Content-Type\":\"application/json\"}}" >&3 && jq -n "env"'
 
+bin/webhook-server --location / -v --egress-proxy :8888 -- curl -sv 'http://www.baidu.com/'
+
 
 ```

@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
+	"github.com/elazarl/goproxy"
 	"github.com/xiaopal/kube-informer/pkg/appctx"
 	"github.com/xiaopal/kube-informer/pkg/subreaper"
 )
@@ -23,6 +25,7 @@ const (
 var (
 	logger             *log.Logger
 	serverBindAddr     string
+	egressProxy        string
 	location           string
 	exposeFormValues   bool
 	exposeHeaders      bool
@@ -65,6 +68,29 @@ func httpServ() error {
 	})
 
 	logger.Printf("Serving %s ...", serverBindAddr)
+	if egressProxy != "" {
+		proxy := goproxy.NewProxyHttpServer()
+		proxy.Logger = newLogger("[egress] ")
+		proxyserver := &http.Server{Addr: egressProxy, Handler: goproxy.NewProxyHttpServer()}
+		if addr := strings.Split(egressProxy, ":"); len(addr) == 2 {
+			egressProxy = fmt.Sprintf("127.0.0.1:%s", addr[len(addr)-1])
+		} else {
+			return fmt.Errorf("invalid --egress-proxy")
+		}
+		proxy.Logger.Printf("Serving egress proxy %s (http_proxy=%s) ...", proxyserver.Addr, egressProxy)
+		go func() {
+			if err := proxyserver.ListenAndServe(); err != nil {
+				proxy.Logger.Printf("egress proxy: %v", err)
+				app.End()
+			}
+		}()
+		defer func() {
+			proxy.Logger.Printf("Closing %s ...", proxyserver.Addr)
+			if err := proxyserver.Close(); err != nil {
+				proxy.Logger.Printf("failed to close egress proxy: %v", err)
+			}
+		}()
+	}
 	go func() {
 		app.WaitGroup().Add(1)
 		defer app.WaitGroup().Done()
@@ -120,6 +146,7 @@ func main() {
 	flag.BoolVar(&jsonHandlers, "json-handlers", false, "deprecated, same as --type=json")
 	flag.BoolVar(&accessLogs, "v", false, "show access logs")
 	flag.BoolVar(&requestData, "data", false, "pass request data to stdin")
+	flag.StringVar(&egressProxy, "egress-proxy", "", "start and setup egress http/https proxy, eg :8888")
 	flag.Parse()
 
 	if jsonHandlers {

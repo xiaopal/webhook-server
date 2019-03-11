@@ -30,6 +30,9 @@ func setupHandler(handler *exec.Cmd, req *http.Request, logger *log.Logger) erro
 	} else {
 		env = append(env, "HTTP_REMOTE_ADDR="+req.RemoteAddr)
 	}
+	if egressProxy != "" {
+		env = append(env, "http_proxy="+egressProxy, "https_proxy="+egressProxy)
+	}
 
 	if err := req.ParseForm(); err != nil {
 		return err

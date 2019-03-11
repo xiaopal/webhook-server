@@ -2,20 +2,29 @@
 
 
 [[projects]]
-  branch = "master"
-  digest = "1:7e66c71a994969d452b5ef39d68ac02bc6b88d56241466664e200f36e2175bfd"
+  digest = "1:2b7b174ae68705866555b73fd848de0749b93b1f99e3295e27f89bebe8702203"
+  name = "github.com/elazarl/goproxy"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "947c36da3153ff334e74d9d980de341d25f358ba"
+  version = "v1.1"
+
+[[projects]]
+  digest = "1:9193a4e7e6de0315d3fca05710a18e8fedf6103663b7987c4f3a53ba5d87df14"
   name = "github.com/xiaopal/kube-informer"
   packages = [
     "pkg/appctx",
     "pkg/subreaper",
   ]
   pruneopts = "UT"
-  revision = "eea55872e2296c2e027f7a7115b4bf66406bc262"
+  revision = "66f4d695c56fcad23618ca3cce26b18ece1e3311"
+  version = "v1.2"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
   input-imports = [
+    "github.com/elazarl/goproxy",
     "github.com/xiaopal/kube-informer/pkg/appctx",
     "github.com/xiaopal/kube-informer/pkg/subreaper",
   ]
